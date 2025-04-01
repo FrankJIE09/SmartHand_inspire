@@ -4,9 +4,10 @@ import mediapipe as mp
 import numpy as np
 import math
 import time
-import pyrealsense2 as rs # 导入 RealSense SDK
+import pyrealsense2 as rs  # 导入 RealSense SDK
 from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusException
+
 
 # --- SmartHandModbusTCP 类 (保持不变) ---
 # ... (省略类的定义) ...
@@ -105,14 +106,15 @@ class SmartHandModbusTCP:
             print("错误: set_angles 需要提供6个角度值")
             return False
         # 验证和转换在 write_multiple_registers 中处理
-        return self.write_multiple_registers(1486, angle_list) # 1486 是目标角度寄存器地址
+        return self.write_multiple_registers(1486, angle_list)  # 1486 是目标角度寄存器地址
 
     # --- 其他方法 (get_angles, get_tactile_data 等保持不变) ---
     def get_angles(self):
         """获取当前各自由度的角度"""
-        return self.read_registers(1546, 6) # 1546 是当前角度寄存器地址
+        return self.read_registers(1546, 6)  # 1546 是当前角度寄存器地址
 
     # 省略 get_tactile_data, get_finger_segments, save_config, clear_error, set_gesture...
+
 
 # --- MediaPipe Initialization ---
 mp_hands = mp.solutions.hands
@@ -125,7 +127,7 @@ ROBOT_HAND_PORT = 6000
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 FPS = 30
-ALPHA = 0.3 # Smoothing factor
+ALPHA = 0.3  # Smoothing factor
 
 # --- Angle Ranges (Recalibration Needed!) ---
 FINGER_ANGLE_RANGE = (50, 180, 0, 1000)
@@ -133,9 +135,10 @@ THUMB_IP_ANGLE_RANGE = (120, 160, 0, 1000)
 THUMB_ROTATION_ANGLE_RANGE = (20, 32, 0, 1000)
 
 # --- Depth Search Parameters ---
-MIN_VALID_DEPTH = 0.1 # meters, min distance to register depth
-MAX_VALID_DEPTH = 2.0 # meters, max distance
-NEIGHBOR_SEARCH_RADIUS = 2 # Search up to 2 pixels away (5x5 area)
+MIN_VALID_DEPTH = 0.1  # meters, min distance to register depth
+MAX_VALID_DEPTH = 2.0  # meters, max distance
+NEIGHBOR_SEARCH_RADIUS = 2  # Search up to 2 pixels away (5x5 area)
+
 
 # --- Helper Functions ---
 
@@ -152,6 +155,7 @@ def calculate_angle(p1_coord, p2_coord, p3_coord):
     angle_rad = np.arccos(cos_theta)
     return np.degrees(angle_rad)
 
+
 def map_angle(angle, from_min, from_max, to_min, to_max):
     """Maps angle from one range to another. Returns float."""
     clip_min, clip_max = min(from_min, from_max), max(from_min, from_max)
@@ -160,6 +164,7 @@ def map_angle(angle, from_min, from_max, to_min, to_max):
     mapped_value = to_min + (angle - from_min) * (to_max - to_min) / (from_max - from_min)
     target_min, target_max = min(to_min, to_max), max(to_min, to_max)
     return np.clip(mapped_value, target_min, target_max)
+
 
 def get_valid_3d_point(x_pixel, y_pixel, depth_frame, depth_intrinsics,
                        min_depth=0.1, max_depth=2.0, search_radius=1):
@@ -182,7 +187,7 @@ def get_valid_3d_point(x_pixel, y_pixel, depth_frame, depth_intrinsics,
             point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x_pixel, y_pixel], depth_m)
             return np.array(point_3d)
         except Exception:
-            pass # Fall through to neighbor search if deprojection fails
+            pass  # Fall through to neighbor search if deprojection fails
 
     # 2. If original invalid, search neighbors in expanding box
     for r in range(1, search_radius + 1):
@@ -205,11 +210,12 @@ def get_valid_3d_point(x_pixel, y_pixel, depth_frame, depth_intrinsics,
                             # print(f" Landmark ({x_pixel},{y_pixel}): Used neighbor ({nx},{ny}) depth {neighbor_depth_m:.3f}") # Debug
                             return np.array(point_3d)
                         except Exception:
-                            continue # Try next neighbor if deprojection fails
+                            continue  # Try next neighbor if deprojection fails
 
     # 3. If no valid depth found in neighbors
     # print(f" Landmark ({x_pixel},{y_pixel}): No valid depth found.") # Debug
     return None
+
 
 # --- Main Function ---
 def main():
@@ -251,7 +257,7 @@ def main():
                     frames = pipeline.wait_for_frames(timeout_ms=1000)
                 except RuntimeError as e:
                     print(f"RealSense: Failed to get frames: {e}")
-                    break # Exit loop on persistent frame error
+                    break  # Exit loop on persistent frame error
                 aligned_frames = align.process(frames)
                 aligned_depth_frame = aligned_frames.get_depth_frame()
                 color_frame = aligned_frames.get_color_frame()
@@ -276,8 +282,8 @@ def main():
                     hand_detected_this_frame = True
                     hand_landmarks = results.multi_hand_landmarks[0]
                     mp_drawing.draw_landmarks(color_image, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                                            mp_drawing_styles.get_default_hand_landmarks_style(),
-                                            mp_drawing_styles.get_default_hand_connections_style())
+                                              mp_drawing_styles.get_default_hand_landmarks_style(),
+                                              mp_drawing_styles.get_default_hand_connections_style())
 
                     # --- Get 3D Coordinates using Neighbor Search ---
                     num_valid_points = 0
@@ -298,9 +304,8 @@ def main():
                             # Optional: Draw marker at original pixel if point found
                             # cv2.circle(color_image, (x_pixel, y_pixel), 3, (0, 255, 0), -1) # Green dot
                         # else:
-                            # Optional: Draw marker if point not found
-                            # cv2.circle(color_image, (x_pixel, y_pixel), 3, (0, 0, 255), -1) # Red dot
-
+                        # Optional: Draw marker if point not found
+                        # cv2.circle(color_image, (x_pixel, y_pixel), 3, (0, 0, 255), -1) # Red dot
 
                     # --- Calculate Angles Per DOF (if points are valid) ---
                     # Using threshold > 15 as an example, tune as needed
@@ -309,14 +314,14 @@ def main():
                         try:
                             # Define required indices for each angle calculation for clarity
                             req_indices = {
-                                0: [17, 18, 19], # Pinky
-                                1: [13, 14, 15], # Ring
+                                0: [17, 18, 19],  # Pinky
+                                1: [13, 14, 15],  # Ring
                                 2: [9, 10, 11],  # Middle
-                                3: [5, 6, 7],    # Index
-                                4: [2, 3, 4],    # Thumb IP
-                                5: [5, 0, 2]     # Thumb Rot
+                                3: [5, 6, 7],  # Index
+                                4: [2, 3, 4],  # Thumb IP
+                                5: [5, 0, 2]  # Thumb Rot
                             }
-                            angle_funcs = { # Map DOF index to calculation function
+                            angle_funcs = {  # Map DOF index to calculation function
                                 0: lambda p: calculate_angle(p[17], p[18], p[19]),
                                 1: lambda p: calculate_angle(p[13], p[14], p[15]),
                                 2: lambda p: calculate_angle(p[9], p[10], p[11]),
@@ -324,8 +329,9 @@ def main():
                                 4: lambda p: calculate_angle(p[2], p[3], p[4]),
                                 5: lambda p: calculate_angle(p[5], p[0], p[2])
                             }
-                            range_map = { # Map DOF index to range constant
-                                0: FINGER_ANGLE_RANGE, 1: FINGER_ANGLE_RANGE, 2: FINGER_ANGLE_RANGE, 3: FINGER_ANGLE_RANGE,
+                            range_map = {  # Map DOF index to range constant
+                                0: FINGER_ANGLE_RANGE, 1: FINGER_ANGLE_RANGE, 2: FINGER_ANGLE_RANGE,
+                                3: FINGER_ANGLE_RANGE,
                                 4: THUMB_IP_ANGLE_RANGE, 5: THUMB_ROTATION_ANGLE_RANGE
                             }
 
@@ -348,7 +354,8 @@ def main():
                                     filtered_robot_angles[:] = temp_target_angles
                                     first_run_valid_angles = False
                                 else:
-                                    filtered_robot_angles = ALPHA * temp_target_angles + (1 - ALPHA) * filtered_robot_angles
+                                    filtered_robot_angles = ALPHA * temp_target_angles + (
+                                                1 - ALPHA) * filtered_robot_angles
                             else:
                                 first_run_valid_angles = True
 
@@ -359,8 +366,8 @@ def main():
                         # print(f"警告：有效关节点数量不足 ({num_valid_points})，跳过计算。")
                         first_run_valid_angles = True
 
-                else: # No hand detected
-                    first_run_valid_angles = True # Reset filter init
+                else:  # No hand detected
+                    first_run_valid_angles = True  # Reset filter init
 
                 # --- Send Command ---
                 if hand.client.is_socket_open():
@@ -370,7 +377,8 @@ def main():
 
                 # --- Display Image ---
                 display_angles = [int(round(a)) for a in filtered_robot_angles]
-                cv2.putText(color_image, f"Target: {display_angles}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(color_image, f"Target: {display_angles}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (0, 255, 0), 2)
                 cv2.imshow('Depth Camera Hand Control', color_image)
 
                 # --- Exit Condition ---
@@ -383,10 +391,11 @@ def main():
             pipeline.stop()
             print("正在关闭 Modbus 连接...")
             if hand.client.is_socket_open():
-                 time.sleep(0.1)
+                time.sleep(0.1)
             hand.close()
             cv2.destroyAllWindows()
             print("程序结束。")
+
 
 if __name__ == '__main__':
     main()

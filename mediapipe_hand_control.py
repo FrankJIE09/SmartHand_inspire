@@ -143,7 +143,7 @@ FINGER_ANGLE_RANGE = (50, 180, 0, 1000) # 假设 0=闭合, 1000=张开
 # 2. 大拇指指尖弯曲/伸直 (Thumb IP Joint)
 # 人手拇指弯曲 (角度小, ~70度) -> 机器人值 A (e.g., 0)
 # 人手拇指伸直 (角度大, ~180度) -> 机器人值 B (e.g., 1000)
-THUMB_IP_ANGLE_RANGE = (70, 180, 0, 1000) # 假设 0=闭合, 1000=张开
+THUMB_IP_ANGLE_RANGE = (120, 150, 0, 1000) # 假设 0=闭合, 1000=张开
 
 # 3. 大拇指旋转 (Thumb Rotation/Opposition) - ***需要仔细标定***
 #   我们用 掌根(0) 到 食指根部(5) 的向量 与 掌根(0) 到 大拇指第二指节(2) 的向量 的夹角来近似
@@ -151,7 +151,7 @@ THUMB_IP_ANGLE_RANGE = (70, 180, 0, 1000) # 假设 0=闭合, 1000=张开
 #   假设：拇指靠近手掌（旋转角小）-> 机器人值 A (e.g., 0)
 #   假设：拇指远离手掌（旋转角大）-> 机器人值 B (e.g., 1000)
 #   !!! 这个范围 (20, 70) 是完全猜测的，您必须通过打印角度值来确定实际范围 !!!
-THUMB_ROTATION_ANGLE_RANGE = (20, 70, 0, 1000) # 假设 0=某个旋转极限, 1000=另一个旋转极限
+THUMB_ROTATION_ANGLE_RANGE = (160, 172, 0, 1000) # 假设 0=某个旋转极限, 1000=另一个旋转极限
 
 # 辅助函数：计算三个点之间的角度 (保持不变)
 def calculate_angle(p1, p2, p3):
@@ -301,10 +301,11 @@ def main():
                     # DOF 4: 大拇指指尖弯曲 (Thumb IP)
                     angle_thumb_ip = calculate_angle(lm[2], lm[3], lm[4])
                     target_robot_angles[4] = map_angle(angle_thumb_ip, *THUMB_IP_ANGLE_RANGE)
+                    # print(f"Thumb Belt Angle (deg): {angle_thumb_ip:.1f}")
 
                     # DOF 5: 大拇指旋转 (Thumb Rotation)
                     # 计算 掌根(0)-食指根(5) 和 掌根(0)-拇指第二指节(2) 的夹角
-                    angle_thumb_rot = calculate_angle(lm[5], lm[0], lm[2])
+                    angle_thumb_rot = calculate_angle(lm[3], lm[2], lm[1])
                     target_robot_angles[5] = map_angle(angle_thumb_rot, *THUMB_ROTATION_ANGLE_RANGE)
                     # 打印用于标定范围 (取消注释以观察):
                     print(f"Thumb Rotation Angle (deg): {angle_thumb_rot:.1f}")

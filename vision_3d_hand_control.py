@@ -114,276 +114,275 @@ class SmartHandModbusTCP:
 
     # 省略 get_tactile_data, get_finger_segments, save_config, clear_error, set_gesture...
 
-# --- MediaPipe 初始化 (保持不变) ---
+# --- MediaPipe Initialization ---
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
-# --- 参数配置 (部分修改) ---
+# --- Parameters ---
 ROBOT_HAND_IP = '192.168.11.210'
 ROBOT_HAND_PORT = 6000
-# CAMERA_INDEX 不再需要
-
-# RealSense 相机设置 (示例)
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 FPS = 30
+ALPHA = 0.3 # Smoothing factor
 
-# --- 平滑滤波参数 (保持不变) ---
-ALPHA = 0.3
+# --- Angle Ranges (Recalibration Needed!) ---
+FINGER_ANGLE_RANGE = (50, 180, 0, 1000)
+THUMB_IP_ANGLE_RANGE = (120, 160, 0, 1000)
+THUMB_ROTATION_ANGLE_RANGE = (20, 32, 0, 1000)
 
-# --- 角度范围常量 (可能需要重新标定) ---
-# !! 注意：基于3D坐标计算的角度范围可能与基于2D的不同，需要重新标定 !!
-FINGER_ANGLE_RANGE = (50, 180, 0, 1000) # 假设 0=闭合, 1000=张开
-THUMB_IP_ANGLE_RANGE = (70, 180, 0, 1000) # 假设 0=闭合, 1000=张开
-THUMB_ROTATION_ANGLE_RANGE = (20, 70, 0, 1000) # !! 必须重新标定 !!
+# --- Depth Search Parameters ---
+MIN_VALID_DEPTH = 0.1 # meters, min distance to register depth
+MAX_VALID_DEPTH = 2.0 # meters, max distance
+NEIGHBOR_SEARCH_RADIUS = 2 # Search up to 2 pixels away (5x5 area)
 
-# --- 辅助函数 (calculate_angle, map_angle 保持不变) ---
+# --- Helper Functions ---
+
 def calculate_angle(p1_coord, p2_coord, p3_coord):
-    """计算点 p2 处的角度 (p1-p2-p3)，输入为3D坐标 NumPy 数组"""
-    # 确保输入是 NumPy 数组
-    p1 = np.array(p1_coord)
-    p2 = np.array(p2_coord)
-    p3 = np.array(p3_coord)
-
-    v1 = p1 - p2
-    v2 = p3 - p2
-
-    norm_v1 = np.linalg.norm(v1)
-    norm_v2 = np.linalg.norm(v2)
-
-    if norm_v1 < 1e-6 or norm_v2 < 1e-6:
-        return 90.0 # 或者返回上次有效值
-
+    """Calculates angle at p2. Returns angle in degrees or None if input is invalid."""
+    if p1_coord is None or p2_coord is None or p3_coord is None:
+        return None
+    p1, p2, p3 = np.array(p1_coord), np.array(p2_coord), np.array(p3_coord)
+    v1, v2 = p1 - p2, p3 - p2
+    norm_v1, norm_v2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    if norm_v1 < 1e-6 or norm_v2 < 1e-6: return None
     dot_product = np.dot(v1, v2)
     cos_theta = np.clip(dot_product / (norm_v1 * norm_v2), -1.0, 1.0)
     angle_rad = np.arccos(cos_theta)
-    angle_deg = np.degrees(angle_rad)
-    return angle_deg
+    return np.degrees(angle_rad)
 
 def map_angle(angle, from_min, from_max, to_min, to_max):
-    """将角度从 from_range 线性映射到 to_range"""
-    # (函数体保持不变)
-    clip_min = min(from_min, from_max)
-    clip_max = max(from_min, from_max)
+    """Maps angle from one range to another. Returns float."""
+    clip_min, clip_max = min(from_min, from_max), max(from_min, from_max)
     angle = np.clip(angle, clip_min, clip_max)
-    if abs(from_max - from_min) < 1e-6:
-         mapped_value = (to_min + to_max) / 2
-    else:
-        mapped_value = to_min + (angle - from_min) * (to_max - to_min) / (from_max - from_min)
-    target_min = min(to_min, to_max)
-    target_max = max(to_min, to_max)
-    mapped_value = np.clip(mapped_value, target_min, target_max)
-    return mapped_value
+    if abs(from_max - from_min) < 1e-6: return (to_min + to_max) / 2
+    mapped_value = to_min + (angle - from_min) * (to_max - to_min) / (from_max - from_min)
+    target_min, target_max = min(to_min, to_max), max(to_min, to_max)
+    return np.clip(mapped_value, target_min, target_max)
 
-# --- 主函数 (主要修改部分) ---
+def get_valid_3d_point(x_pixel, y_pixel, depth_frame, depth_intrinsics,
+                       min_depth=0.1, max_depth=2.0, search_radius=1):
+    """
+    Tries to get a valid 3D point for a given pixel (x_pixel, y_pixel).
+    If depth at the original pixel is invalid, searches neighbors in an expanding box.
+    Uses the first valid neighbor found for deprojection.
+    Returns 3D point (NumPy array) or None.
+    """
+    height, width = depth_intrinsics.height, depth_intrinsics.width
+
+    # Check bounds for the original target pixel itself
+    if not (0 <= x_pixel < width and 0 <= y_pixel < height):
+        return None
+
+    # 1. Try original pixel
+    depth_m = depth_frame.get_distance(x_pixel, y_pixel)
+    if min_depth < depth_m < max_depth:
+        try:
+            point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x_pixel, y_pixel], depth_m)
+            return np.array(point_3d)
+        except Exception:
+            pass # Fall through to neighbor search if deprojection fails
+
+    # 2. If original invalid, search neighbors in expanding box
+    for r in range(1, search_radius + 1):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                # Skip if not on the boundary of the current search radius 'r'
+                # (already checked inner radii)
+                if abs(dx) < r and abs(dy) < r:
+                    continue
+
+                nx, ny = x_pixel + dx, y_pixel + dy
+
+                # Check bounds for neighbor
+                if 0 <= nx < width and 0 <= ny < height:
+                    neighbor_depth_m = depth_frame.get_distance(nx, ny)
+                    if min_depth < neighbor_depth_m < max_depth:
+                        try:
+                            # Use neighbor's pixel and depth for deprojection
+                            point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [nx, ny], neighbor_depth_m)
+                            # print(f" Landmark ({x_pixel},{y_pixel}): Used neighbor ({nx},{ny}) depth {neighbor_depth_m:.3f}") # Debug
+                            return np.array(point_3d)
+                        except Exception:
+                            continue # Try next neighbor if deprojection fails
+
+    # 3. If no valid depth found in neighbors
+    # print(f" Landmark ({x_pixel},{y_pixel}): No valid depth found.") # Debug
+    return None
+
+# --- Main Function ---
 def main():
-    # 初始化机器人手 (保持不变)
+    # --- Initializations (Robot Hand, RealSense Pipeline, Alignment, Intrinsics) ---
+    # (Same as before)
     hand = SmartHandModbusTCP(ip=ROBOT_HAND_IP, port=ROBOT_HAND_PORT)
-    if not hand.connect():
-        print("无法启动机器人手连接。")
-        return
-
-    # --- 初始化 Intel RealSense ---
+    if not hand.connect(): return
     pipeline = rs.pipeline()
     config = rs.config()
-    # 获取设备产品线，以启用与特定设备兼容的特性
-    pipeline_wrapper = rs.pipeline_wrapper(pipeline)
-    pipeline_profile = config.resolve(pipeline_wrapper)
-    device = pipeline_profile.get_device()
-    # device_product_line = str(device.get_info(rs.camera_info.product_line)) # D400 系列等
-
-    # 配置数据流
-    config.enable_stream(rs.stream.depth, FRAME_WIDTH, FRAME_HEIGHT, rs.format.z16, FPS)
-    config.enable_stream(rs.stream.color, FRAME_WIDTH, FRAME_HEIGHT, rs.format.bgr8, FPS)
-
-    # 启动管道
-    profile = pipeline.start(config)
-
-    # 获取深度传感器的缩放比例 (米/单位)
+    try:
+        config.enable_stream(rs.stream.depth, FRAME_WIDTH, FRAME_HEIGHT, rs.format.z16, FPS)
+        config.enable_stream(rs.stream.color, FRAME_WIDTH, FRAME_HEIGHT, rs.format.bgr8, FPS)
+        profile = pipeline.start(config)
+    except Exception as e:
+        print(f"Error configuring or starting RealSense pipeline: {e}")
+        if hand.client.is_socket_open(): hand.close()
+        return
     depth_sensor = profile.get_device().first_depth_sensor()
     depth_scale = depth_sensor.get_depth_scale()
-    print(f"深度传感器缩放比例: {depth_scale}")
+    align = rs.align(rs.stream.color)
+    depth_intrinsics = rs.video_stream_profile(profile.get_stream(rs.stream.depth)).get_intrinsics()
 
-    # 创建对齐对象 (将深度帧对齐到彩色帧)
-    align_to = rs.stream.color
-    align = rs.align(align_to)
-
-    # 获取内参 (用于反投影) - 在循环外获取一次即可
-    depth_profile = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
-    color_profile = rs.video_stream_profile(profile.get_stream(rs.stream.color))
-    depth_intrinsics = depth_profile.get_intrinsics()
-    color_intrinsics = color_profile.get_intrinsics() # 彩色帧内参通常不直接用于反投影深度点
-
-    # 初始化滤波和平滑变量 (保持不变)
+    # --- Smoothing variables ---
     initial_pose = [500.0] * 6
     filtered_robot_angles = np.array(initial_pose, dtype=float)
-    first_frame = True
+    first_run_valid_angles = True
 
-    # --- MediaPipe Hands 初始化 ---
+    # --- MediaPipe Hands Initialization ---
     with mp_hands.Hands(
             model_complexity=0,
             min_detection_confidence=0.7,
             min_tracking_confidence=0.7,
             max_num_hands=1) as hands:
 
-        try: # 使用 try...finally 确保 pipeline 停止
+        try:
             while True:
-                # --- 获取和处理 RealSense 帧 ---
-                frames = pipeline.wait_for_frames()
-                aligned_frames = align.process(frames) # 获取对齐后的帧集
-
+                # --- Get and Align Frames ---
+                try:
+                    frames = pipeline.wait_for_frames(timeout_ms=1000)
+                except RuntimeError as e:
+                    print(f"RealSense: Failed to get frames: {e}")
+                    break # Exit loop on persistent frame error
+                aligned_frames = align.process(frames)
                 aligned_depth_frame = aligned_frames.get_depth_frame()
                 color_frame = aligned_frames.get_color_frame()
+                if not aligned_depth_frame or not color_frame: continue
 
-                if not aligned_depth_frame or not color_frame:
-                    print("丢失帧...")
-                    continue
-
-                # 将 RealSense 彩色帧转换为 NumPy 数组
                 color_image = np.asanyarray(color_frame.get_data())
-                # 获取图像尺寸
                 height, width, _ = color_image.shape
 
-                # --- MediaPipe 处理 ---
-                # 为了提高性能，将图像标记为不可写
+                # --- MediaPipe Processing ---
                 color_image.flags.writeable = False
-                # BGR -> RGB
                 image_rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-                # 处理
                 results = hands.process(image_rgb)
-                # 转回 BGR 用于绘制
                 color_image.flags.writeable = True
-                # color_image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR) # 在 color_image 上直接绘制即可
 
-                # 初始化目标角度和 3D 坐标
-                target_robot_angles = np.zeros(6, dtype=float)
-                joint_3d_positions = [None] * 21 # 存储 21 个关节点的 3D 坐标
+                # --- Process Detections ---
+                joint_3d_positions = [None] * 21
                 hand_detected_this_frame = False
+                # Start with previous filtered state for potentially missing DOFs
+                temp_target_angles = np.copy(filtered_robot_angles)
 
-                # --- 处理检测结果 ---
                 if results.multi_hand_landmarks:
                     hand_detected_this_frame = True
                     hand_landmarks = results.multi_hand_landmarks[0]
+                    mp_drawing.draw_landmarks(color_image, hand_landmarks, mp_hands.HAND_CONNECTIONS,
+                                            mp_drawing_styles.get_default_hand_landmarks_style(),
+                                            mp_drawing_styles.get_default_hand_connections_style())
 
-                    # --- 绘制 2D 骨架 ---
-                    mp_drawing.draw_landmarks(
-                        color_image,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style())
-
-                    # --- 获取关节点的 3D 坐标 ---
-                    valid_landmarks = True
+                    # --- Get 3D Coordinates using Neighbor Search ---
+                    num_valid_points = 0
                     for i, lm in enumerate(hand_landmarks.landmark):
-                        # 将归一化坐标转为像素坐标
-                        x_pixel = int(lm.x * width)
-                        y_pixel = int(lm.y * height)
+                        x_pixel, y_pixel = int(lm.x * width), int(lm.y * height)
+                        # Call the helper function to get 3D point with neighbor search
+                        point_3d = get_valid_3d_point(
+                            x_pixel, y_pixel,
+                            aligned_depth_frame,
+                            depth_intrinsics,
+                            min_depth=MIN_VALID_DEPTH,
+                            max_depth=MAX_VALID_DEPTH,
+                            search_radius=NEIGHBOR_SEARCH_RADIUS
+                        )
+                        joint_3d_positions[i] = point_3d
+                        if point_3d is not None:
+                            num_valid_points += 1
+                            # Optional: Draw marker at original pixel if point found
+                            # cv2.circle(color_image, (x_pixel, y_pixel), 3, (0, 255, 0), -1) # Green dot
+                        # else:
+                            # Optional: Draw marker if point not found
+                            # cv2.circle(color_image, (x_pixel, y_pixel), 3, (0, 0, 255), -1) # Red dot
 
-                        # 防止像素坐标越界
-                        if 0 <= x_pixel < width and 0 <= y_pixel < height:
-                            # 获取该像素的深度值 (单位：米)
-                            depth_m = aligned_depth_frame.get_distance(x_pixel, y_pixel)
 
-                            # 如果深度有效 (大于0)
-                            if depth_m > 0:
-                                # 反投影计算 3D 坐标 (相对于相机)
-                                point_3d = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x_pixel, y_pixel], depth_m)
-                                joint_3d_positions[i] = np.array(point_3d)
-                                # 可选：在图像上绘制 3D 坐标或深度值
-                                cv2.putText(color_image, f"{point_3d[0]:.2f},{point_3d[1]:.2f},{point_3d[2]:.2f}",
-                                            (x_pixel, y_pixel), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,255,255), 1)
-                            else:
-                                joint_3d_positions[i] = None # 深度无效
-                                valid_landmarks = False
-                        else:
-                            joint_3d_positions[i] = None # 像素越界
-                            valid_landmarks = False
-
-                    # --- 如果所有需要的关节点都有效，则计算角度 ---
-                    if valid_landmarks:
+                    # --- Calculate Angles Per DOF (if points are valid) ---
+                    # Using threshold > 15 as an example, tune as needed
+                    if num_valid_points > 15:
+                        angle_calculation_successful = False
                         try:
-                            # 检查计算角度所需的点是否都有效 (非 None)
-                            # (这里简化，实际应检查每个 calculate_angle 用到的点)
-                            required_indices = [0, 2, 3, 4, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19]
-                            if all(joint_3d_positions[idx] is not None for idx in required_indices):
+                            # Define required indices for each angle calculation for clarity
+                            req_indices = {
+                                0: [17, 18, 19], # Pinky
+                                1: [13, 14, 15], # Ring
+                                2: [9, 10, 11],  # Middle
+                                3: [5, 6, 7],    # Index
+                                4: [2, 3, 4],    # Thumb IP
+                                5: [5, 0, 2]     # Thumb Rot
+                            }
+                            angle_funcs = { # Map DOF index to calculation function
+                                0: lambda p: calculate_angle(p[17], p[18], p[19]),
+                                1: lambda p: calculate_angle(p[13], p[14], p[15]),
+                                2: lambda p: calculate_angle(p[9], p[10], p[11]),
+                                3: lambda p: calculate_angle(p[5], p[6], p[7]),
+                                4: lambda p: calculate_angle(p[2], p[3], p[4]),
+                                5: lambda p: calculate_angle(p[5], p[0], p[2])
+                            }
+                            range_map = { # Map DOF index to range constant
+                                0: FINGER_ANGLE_RANGE, 1: FINGER_ANGLE_RANGE, 2: FINGER_ANGLE_RANGE, 3: FINGER_ANGLE_RANGE,
+                                4: THUMB_IP_ANGLE_RANGE, 5: THUMB_ROTATION_ANGLE_RANGE
+                            }
 
-                                # --- 计算角度 (使用 3D 坐标) ---
-                                # DOF 0: 小指弯曲
-                                angle_pinky = calculate_angle(joint_3d_positions[17], joint_3d_positions[18], joint_3d_positions[19])
-                                target_robot_angles[0] = map_angle(angle_pinky, *FINGER_ANGLE_RANGE)
-                                # ... (其他手指 DOF 1-3 类似)
-                                angle_ring = calculate_angle(joint_3d_positions[13], joint_3d_positions[14], joint_3d_positions[15])
-                                target_robot_angles[1] = map_angle(angle_ring, *FINGER_ANGLE_RANGE)
-                                angle_middle = calculate_angle(joint_3d_positions[9], joint_3d_positions[10], joint_3d_positions[11])
-                                target_robot_angles[2] = map_angle(angle_middle, *FINGER_ANGLE_RANGE)
-                                angle_index = calculate_angle(joint_3d_positions[5], joint_3d_positions[6], joint_3d_positions[7])
-                                target_robot_angles[3] = map_angle(angle_index, *FINGER_ANGLE_RANGE)
+                            # Iterate through DOFs
+                            for dof_idx in range(6):
+                                indices_needed = req_indices[dof_idx]
+                                # Check if all required points for this DOF are valid
+                                if all(joint_3d_positions[idx] is not None for idx in indices_needed):
+                                    # Calculate angle
+                                    angle = angle_funcs[dof_idx](joint_3d_positions)
+                                    if angle is not None:
+                                        # Map angle and update temp target
+                                        temp_target_angles[dof_idx] = map_angle(angle, *range_map[dof_idx])
+                                        angle_calculation_successful = True
+                                # else: Keep the previous value in temp_target_angles
 
-                                # DOF 4: 大拇指指尖弯曲 (IP) - 使用正确的点
-                                angle_thumb_ip = calculate_angle(joint_3d_positions[2], joint_3d_positions[3], joint_3d_positions[4])
-                                target_robot_angles[4] = map_angle(angle_thumb_ip, *THUMB_IP_ANGLE_RANGE)
-
-                                # DOF 5: 大拇指旋转
-                                angle_thumb_rot = calculate_angle(joint_3d_positions[5], joint_3d_positions[0], joint_3d_positions[2])
-                                target_robot_angles[5] = map_angle(angle_thumb_rot, *THUMB_ROTATION_ANGLE_RANGE)
-                                # print(f"Thumb Rotation Angle (3D): {angle_thumb_rot:.1f}")
-
-                                # --- EMA 平滑滤波 ---
-                                if first_frame:
-                                    filtered_robot_angles[:] = target_robot_angles
-                                    first_frame = False
+                            # --- Apply Smoothing Filter ---
+                            if angle_calculation_successful:
+                                if first_run_valid_angles:
+                                    filtered_robot_angles[:] = temp_target_angles
+                                    first_run_valid_angles = False
                                 else:
-                                    filtered_robot_angles = ALPHA * target_robot_angles + (1 - ALPHA) * filtered_robot_angles
-
-                                # --- 发送角度到机器人手 ---
-                                if hand.client.is_socket_open():
-                                    hand.set_angles(filtered_robot_angles)
-                                else:
-                                    print("连接已断开，尝试重新连接...")
-                                    if hand.connect():
-                                        hand.set_angles(filtered_robot_angles)
+                                    filtered_robot_angles = ALPHA * temp_target_angles + (1 - ALPHA) * filtered_robot_angles
                             else:
-                                print("警告：计算角度所需的部分关节点深度无效，跳过计算。")
-                                # 保持上一个姿态
+                                first_run_valid_angles = True
 
                         except Exception as e:
-                            print(f"计算或发送角度时出错: {e}")
-                            # 保持上一个姿态
-
-                    else: # valid_landmarks is False
-                         print("警告：部分或全部关节点深度无效。")
-                         # 保持上一个姿态
-                         first_frame = True # 重置滤波器初始化标志
+                            print(f"Error during angle calculation or mapping: {e}")
+                            first_run_valid_angles = True
+                    else:
+                        # print(f"警告：有效关节点数量不足 ({num_valid_points})，跳过计算。")
+                        first_run_valid_angles = True
 
                 else: # No hand detected
-                    # 保持上一个姿态
-                    first_frame = True # 下次检测到手时重新初始化
+                    first_run_valid_angles = True # Reset filter init
 
-                # --- 显示图像 ---
+                # --- Send Command ---
+                if hand.client.is_socket_open():
+                    hand.set_angles(filtered_robot_angles)
+                else:
+                    if hand.connect(): hand.set_angles(filtered_robot_angles)
+
+                # --- Display Image ---
                 display_angles = [int(round(a)) for a in filtered_robot_angles]
-                cv2.putText(color_image, f"Target: {display_angles}", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                # (可选) 显示 Raw 值
-                # if hand_detected_this_frame and valid_landmarks:
-                #      raw_display = [int(round(a)) for a in target_robot_angles]
-                #      cv2.putText(color_image, f"Raw:    {raw_display}", (10, 60),
-                #                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
-
+                cv2.putText(color_image, f"Target: {display_angles}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imshow('Depth Camera Hand Control', color_image)
 
-                # 按 'q' 键退出
+                # --- Exit Condition ---
                 if cv2.waitKey(5) & 0xFF == ord('q'):
                     break
 
         finally:
-            # --- 清理 ---
+            # --- Cleanup ---
             print("正在停止 RealSense 管道...")
             pipeline.stop()
             print("正在关闭 Modbus 连接...")
             if hand.client.is_socket_open():
-                 # hand.set_angles([int(round(p)) for p in initial_pose]) # 可选：发送初始姿态
                  time.sleep(0.1)
             hand.close()
             cv2.destroyAllWindows()

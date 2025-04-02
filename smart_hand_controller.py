@@ -47,6 +47,7 @@ class SmartHandModbusTCP:
         """建立与设备的连接"""
         if not self.client.connect():
             raise ConnectionError("无法连接到设备")
+        return True
 
     def close(self):
         """关闭与设备的连接"""
@@ -127,6 +128,8 @@ class SmartHandModbusTCP:
         if len(angle_list) != 6:
             raise ValueError("需要提供6个角度值")
         self.write_multiple_registers(1486, angle_list)
+        return True
+
 
     def get_tactile_data(self, sensor):
         """
